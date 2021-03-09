@@ -271,7 +271,7 @@ TEST_CASE("ArbCore inbox") {
         INFO("RUN " << i);
         runCheckArbCore(arbCore, raw_messages, 0, 1, true);
     }
-    auto tx = arbCore->makeTransaction();
+    auto tx = arbCore->makeReadOnlyTransaction();
     auto position = arbCore->getSideloadPosition(*tx, 2);
     REQUIRE(position.status.ok());
 

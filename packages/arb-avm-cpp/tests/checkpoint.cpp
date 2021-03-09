@@ -26,7 +26,7 @@
 #define CATCH_CONFIG_ENABLE_BENCHMARKING 1
 #include <catch2/catch.hpp>
 
-void saveValue(Transaction& transaction,
+void saveValue(ReadWriteTransaction& transaction,
                const value& val,
                uint32_t expected_ref_count,
                bool expected_status) {
@@ -36,7 +36,7 @@ void saveValue(Transaction& transaction,
     REQUIRE(results.reference_count == expected_ref_count);
 }
 
-void getValue(const Transaction& transaction,
+void getValue(const ReadOnlyTransaction& transaction,
               const value& value,
               uint32_t expected_ref_count,
               bool expected_status,
@@ -48,7 +48,7 @@ void getValue(const Transaction& transaction,
     REQUIRE(hash_value(results.data) == hash_value(value));
 }
 
-void getTuple(const Transaction& transaction,
+void getTuple(const ReadOnlyTransaction& transaction,
               const value& val,
               uint32_t expected_ref_count,
               bool expected_status,
@@ -65,7 +65,7 @@ void getTuple(const Transaction& transaction,
     REQUIRE(results.status.ok() == expected_status);
 }
 
-void getTupleValues(const Transaction& transaction,
+void getTupleValues(const ReadOnlyTransaction& transaction,
                     uint256_t tuple_hash,
                     std::vector<uint256_t> value_hashes,
                     ValueCache& value_cache) {
@@ -84,7 +84,7 @@ void getTupleValues(const Transaction& transaction,
 TEST_CASE("Save value") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     SECTION("save 1 num tuple") {
         uint256_t num = 1;
@@ -104,7 +104,7 @@ TEST_CASE("Save value") {
 TEST_CASE("Save tuple") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     SECTION("save 1 num tuple") {
         uint256_t num = 1;
@@ -129,7 +129,7 @@ TEST_CASE("Save tuple") {
 TEST_CASE("Save and get value") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
     ValueCache value_cache{};
 
     SECTION("save empty tuple") {
@@ -157,7 +157,7 @@ TEST_CASE("Save and get value") {
 TEST_CASE("Save and get tuple values") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
     ValueCache value_cache{};
 
     SECTION("save num tuple") {
@@ -213,7 +213,7 @@ TEST_CASE("Save and get tuple values") {
 TEST_CASE("Save And Get Tuple") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
     ValueCache value_cache{};
 
     SECTION("save 1 num tuple") {
@@ -231,7 +231,7 @@ TEST_CASE("Save And Get Tuple") {
     }
     SECTION("save 1 num tuple twice") {
         value_cache.clear();
-        auto transaction2 = storage.makeTransaction();
+        auto transaction2 = storage.makeReadWriteTransaction();
         uint256_t num = 1;
         auto tuple = Tuple::createTuple(num);
         saveValue(*transaction, tuple, 1, true);
@@ -274,7 +274,7 @@ TEST_CASE("Save And Get Tuple") {
     }
     SECTION("save saved tuple in tuple") {
         value_cache.clear();
-        auto transaction2 = storage.makeTransaction();
+        auto transaction2 = storage.makeReadWriteTransaction();
         uint256_t num = 1;
         value inner_tuple = Tuple::createTuple(num);
         value tuple = Tuple::createTuple(inner_tuple);
@@ -295,7 +295,7 @@ TEST_CASE("Save And Get Tuple") {
 TEST_CASE("Checkpoint Benchmark") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
     uint256_t num = 1;
     value tuple = Tuple::createTuple(num);
     for (uint64_t i = 1; i < 100000; i++) {
@@ -316,7 +316,7 @@ TEST_CASE("Checkpoint Benchmark") {
     };
 }
 
-void saveState(Transaction& transaction,
+void saveState(ReadWriteTransaction& transaction,
                const Machine& machine,
                uint256_t expected_ref_count) {
     auto results = saveMachine(transaction, machine);
@@ -325,7 +325,7 @@ void saveState(Transaction& transaction,
     REQUIRE(transaction.commit().ok());
 }
 
-void checkSavedState(const Transaction& transaction,
+void checkSavedState(const ReadWriteTransaction& transaction,
                      const Machine& expected_machine,
                      uint32_t expected_ref_count) {
     auto expected_hash = expected_machine.hash();
@@ -353,7 +353,7 @@ void checkSavedState(const Transaction& transaction,
     REQUIRE(getValue(transaction, data.register_hash, value_cache).status.ok());
 }
 
-void checkDeletedCheckpoint(Transaction& transaction,
+void checkDeletedCheckpoint(ReadOnlyTransaction& transaction,
                             const Machine& deleted_machine) {
     auto deleted_hash = deleted_machine.hash();
     REQUIRE(deleted_hash);
@@ -375,7 +375,7 @@ void checkDeletedCheckpoint(Transaction& transaction,
                  .status.ok());
 }
 
-void deleteCheckpoint(Transaction& transaction,
+void deleteCheckpoint(ReadWriteTransaction& transaction,
                       const Machine& deleted_machine) {
     auto deleted_hash = deleted_machine.hash();
     REQUIRE(deleted_hash);
@@ -443,7 +443,7 @@ Machine getDefaultMachine() {
 TEST_CASE("Save Machinestatedata") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     SECTION("default") {
         auto machine = getDefaultMachine();
@@ -458,7 +458,7 @@ TEST_CASE("Save Machinestatedata") {
 TEST_CASE("Get Machinestate data") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     SECTION("default") {
         auto machine = getDefaultMachine();
@@ -475,7 +475,7 @@ TEST_CASE("Get Machinestate data") {
 TEST_CASE("Delete checkpoint") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     SECTION("default") {
         auto machine = getDefaultMachine();
@@ -491,10 +491,10 @@ TEST_CASE("Delete checkpoint") {
         auto machine = getComplexMachine();
         saveState(*transaction, machine, 1);
         {
-            auto transaction2 = storage.makeTransaction();
+            auto transaction2 = storage.makeReadWriteTransaction();
             saveState(*transaction2, machine, 2);
         }
-        auto transaction3 = storage.makeTransaction();
+        auto transaction3 = storage.makeReadWriteTransaction();
         auto machine_hash = machine.hash();
         REQUIRE(machine_hash);
         auto res = deleteMachine(*transaction3, *machine.hash());
@@ -504,7 +504,7 @@ TEST_CASE("Delete checkpoint") {
         checkDeletedCheckpoint(*transaction3, machine);
     }
     SECTION("delete checkpoint saved twice, reordered") {
-        auto transaction2 = storage.makeTransaction();
+        auto transaction2 = storage.makeReadWriteTransaction();
         auto machine = getComplexMachine();
         saveState(*transaction, machine, 1);
         saveState(*transaction2, machine, 2);

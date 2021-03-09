@@ -20,6 +20,7 @@
 #include <avm_values/value.hpp>
 #include <data_storage/value/valuecache.hpp>
 
+#include <data_storage/readonlytransaction.hpp>
 #include <map>
 #include <set>
 
@@ -30,21 +31,21 @@ class Transaction;
 template <typename T>
 struct DbResult;
 
-SaveResults saveValueImpl(Transaction& transaction,
+SaveResults saveValueImpl(ReadWriteTransaction& tx,
                           const value& val,
                           std::map<uint64_t, uint64_t>& segment_counts);
-DeleteResults deleteValueImpl(Transaction& transaction,
+DeleteResults deleteValueImpl(ReadWriteTransaction& tx,
                               const uint256_t& value_hash,
                               std::map<uint64_t, uint64_t>& segment_counts);
-DbResult<value> getValueImpl(const Transaction& transaction,
-                             uint256_t value_hash,
+DbResult<value> getValueImpl(const ReadOnlyTransaction& tx,
+                             const uint256_t value_hash,
                              std::set<uint64_t>& segment_ids,
                              ValueCache& value_cache);
 
-DbResult<value> getValue(const Transaction& transaction,
-                         uint256_t value_hash,
+DbResult<value> getValue(const ReadOnlyTransaction& tx,
+                         const uint256_t value_hash,
                          ValueCache& value_cache);
-SaveResults saveValue(Transaction& transaction, const value& val);
-DeleteResults deleteValue(Transaction& transaction, uint256_t value_hash);
+SaveResults saveValue(ReadWriteTransaction& tx, const value& val);
+DeleteResults deleteValue(ReadWriteTransaction& tx, uint256_t value_hash);
 
 #endif /* value_hpp */

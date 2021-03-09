@@ -1,5 +1,5 @@
 /*
- * Copyright 2020, Offchain Labs, Inc.
+ * Copyright 2020-2021, Offchain Labs, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,9 @@
 
 #include <avm/inboxmessage.hpp>
 #include <avm/machinethread.hpp>
-#include <data_storage/aggregator.hpp>
 #include <data_storage/checkpoint.hpp>
 #include <data_storage/datastorage.hpp>
+#include <data_storage/readwritetransaction.hpp>
 #include <data_storage/storageresult.hpp>
 #include <data_storage/value/machine.hpp>
 #include <data_storage/value/value.hpp>
@@ -47,7 +47,8 @@ constexpr auto sideload_cache_size = 20;
 
 ArbCore::ArbCore(std::shared_ptr<DataStorage> data_storage_)
     : data_storage(std::move(data_storage_)),
-      code(std::make_shared<Code>(getNextSegmentID(*makeConstTransaction()))) {
+      code(std::make_shared<Code>(
+          getNextSegmentID(*makeReadOnlyTransaction()))) {
     if (logs_cursors.size() > 255) {
         throw std::runtime_error("Too many logscursors");
     }
@@ -60,7 +61,7 @@ ArbCore::ArbCore(std::shared_ptr<DataStorage> data_storage_)
 }
 
 ValueResult<MessageEntry> ArbCore::getMessageEntry(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     uint256_t message_sequence_number) const {
     std::vector<unsigned char> previous_key;
     marshal_uint256_t(message_sequence_number, previous_key);
@@ -75,9 +76,7 @@ ValueResult<MessageEntry> ArbCore::getMessageEntry(
         return {rocksdb::Status::NotFound(), {}};
     }
 
-    auto result = getVectorUsingFamilyAndKey(
-        *tx.transaction, tx.datastorage->messageentry_column.get(),
-        vecToSlice(previous_key));
+    auto result = tx.messageEntryGetVector(vecToSlice(previous_key));
     if (!result.status.ok()) {
         return {result.status, {}};
     }
@@ -163,18 +162,26 @@ bool ArbCore::deliverMessages(
     return true;
 }
 
-std::unique_ptr<Transaction> ArbCore::makeTransaction() {
-    return Transaction::makeTransaction(data_storage);
+std::unique_ptr<ReadOnlyTransaction> ArbCore::makeReadOnlyTransaction() {
+    return ReadOnlyTransaction::makeReadOnlyTransaction(data_storage);
 }
 
-std::unique_ptr<const Transaction> ArbCore::makeConstTransaction() const {
-    auto transaction =
-        std::unique_ptr<rocksdb::Transaction>(data_storage->beginTransaction());
-    return std::make_unique<Transaction>(data_storage, std::move(transaction));
+std::unique_ptr<const ReadOnlyTransaction>
+ArbCore::makeConstReadOnlyTransaction() const {
+    return ReadOnlyTransaction::makeReadOnlyTransaction(data_storage);
+}
+
+std::unique_ptr<ReadWriteTransaction> ArbCore::makeReadWriteTransaction() {
+    return ReadWriteTransaction::makeReadWriteTransaction(data_storage);
+}
+
+std::unique_ptr<const ReadWriteTransaction>
+ArbCore::makeConstReadWriteTransaction() const {
+    return ReadWriteTransaction::makeReadWriteTransaction(data_storage);
 }
 
 rocksdb::Status ArbCore::initialize(const LoadedExecutable& executable) {
-    auto tx = makeTransaction();
+    auto tx = makeReadWriteTransaction();
 
     code = std::make_shared<Code>(0);
     code->addSegment(executable.code);
@@ -213,9 +220,8 @@ rocksdb::Status ArbCore::initialize(const LoadedExecutable& executable) {
             return rocksdb::Status::Corruption();
         }
         marshal_uint256_t(*machine_hash, value_data);
-        auto s = tx->transaction->Put(data_storage->state_column.get(),
-                                      vecToSlice(initial_machine_hash_key),
-                                      vecToSlice(value_data));
+        auto s = tx->statePut(vecToSlice(initial_machine_hash_key),
+                              vecToSlice(value_data));
         if (!s.ok()) {
             std::cerr << "failed to save initial machine values into db: "
                       << res.status.ToString() << std::endl;
@@ -266,19 +272,15 @@ rocksdb::Status ArbCore::initialize(const LoadedExecutable& executable) {
 }
 
 bool ArbCore::initialized() const {
-    auto tx = makeConstTransaction();
+    auto tx = makeConstReadWriteTransaction();
     std::string initial_raw;
-    auto s = tx->transaction->GetForUpdate(
-        rocksdb::ReadOptions(), data_storage->state_column.get(),
-        vecToSlice(initial_machine_hash_key), &initial_raw);
+    auto s = tx->stateGet(vecToSlice(initial_machine_hash_key), &initial_raw);
     return s.ok();
 }
 
-ValueResult<uint256_t> ArbCore::getInitialMachineHash(Transaction& tx) {
+ValueResult<uint256_t> ArbCore::getInitialMachineHash(ReadOnlyTransaction& tx) {
     std::string initial_raw;
-    auto s = tx.transaction->GetForUpdate(
-        rocksdb::ReadOptions(), data_storage->state_column.get(),
-        vecToSlice(initial_machine_hash_key), &initial_raw);
+    auto s = tx.stateGet(vecToSlice(initial_machine_hash_key), &initial_raw);
     if (!s.ok()) {
         return {s, 0};
     }
@@ -289,21 +291,22 @@ ValueResult<uint256_t> ArbCore::getInitialMachineHash(Transaction& tx) {
 }
 
 template <class T>
-std::unique_ptr<T> ArbCore::getInitialMachineImpl(Transaction& tx,
+std::unique_ptr<T> ArbCore::getInitialMachineImpl(ReadOnlyTransaction& tx,
                                                   ValueCache& value_cache) {
     auto machine_hash = getInitialMachineHash(tx);
     return getMachine<T>(machine_hash.data, value_cache);
 }
 
-template std::unique_ptr<Machine> ArbCore::getInitialMachineImpl(Transaction&,
-                                                                 ValueCache&);
+template std::unique_ptr<Machine> ArbCore::getInitialMachineImpl(
+    ReadOnlyTransaction& tx,
+    ValueCache& value_cache);
 template std::unique_ptr<MachineThread> ArbCore::getInitialMachineImpl(
-    Transaction&,
-    ValueCache&);
+    ReadOnlyTransaction& tx,
+    ValueCache& value_cache);
 
 template <class T>
 std::unique_ptr<T> ArbCore::getInitialMachine(ValueCache& value_cache) {
-    auto tx = makeTransaction();
+    auto tx = makeReadOnlyTransaction();
     return getInitialMachineImpl<T>(*tx, value_cache);
 }
 
@@ -311,7 +314,7 @@ template std::unique_ptr<Machine> ArbCore::getInitialMachine(ValueCache&);
 template std::unique_ptr<MachineThread> ArbCore::getInitialMachine(ValueCache&);
 
 template <class T>
-std::unique_ptr<T> ArbCore::getMachineImpl(Transaction& tx,
+std::unique_ptr<T> ArbCore::getMachineImpl(ReadOnlyTransaction& tx,
                                            uint256_t machineHash,
                                            ValueCache& value_cache) {
     auto results = getMachineStateKeys(tx, machineHash);
@@ -322,17 +325,19 @@ std::unique_ptr<T> ArbCore::getMachineImpl(Transaction& tx,
     return getMachineUsingStateKeys<T>(tx, results.data, value_cache);
 }
 
-template std::unique_ptr<Machine> ArbCore::getMachineImpl(Transaction&,
-                                                          uint256_t,
-                                                          ValueCache&);
-template std::unique_ptr<MachineThread> ArbCore::getMachineImpl(Transaction&,
-                                                                uint256_t,
-                                                                ValueCache&);
+template std::unique_ptr<Machine> ArbCore::getMachineImpl(
+    ReadOnlyTransaction& tx,
+    uint256_t machineHash,
+    ValueCache& value_cache);
+template std::unique_ptr<MachineThread> ArbCore::getMachineImpl(
+    ReadOnlyTransaction& tx,
+    uint256_t machineHash,
+    ValueCache& value_cache);
 
 template <class T>
 std::unique_ptr<T> ArbCore::getMachine(uint256_t machineHash,
                                        ValueCache& value_cache) {
-    auto tx = makeTransaction();
+    auto tx = makeReadOnlyTransaction();
     return getMachineImpl<T>(*tx, machineHash, value_cache);
 }
 
@@ -340,7 +345,7 @@ template std::unique_ptr<Machine> ArbCore::getMachine(uint256_t, ValueCache&);
 template std::unique_ptr<MachineThread> ArbCore::getMachine(uint256_t,
                                                             ValueCache&);
 
-rocksdb::Status ArbCore::saveCheckpoint(Transaction& tx) {
+rocksdb::Status ArbCore::saveCheckpoint(ReadWriteTransaction& tx) {
     auto status =
         saveMachineState(tx, *machine, pending_checkpoint.machine_state_keys);
     if (!status.ok()) {
@@ -371,8 +376,7 @@ rocksdb::Status ArbCore::saveCheckpoint(Transaction& tx) {
     auto serialized_checkpoint = serializeCheckpoint(pending_checkpoint);
     std::string value_str(serialized_checkpoint.begin(),
                           serialized_checkpoint.end());
-    auto put_status = tx.transaction->Put(
-        tx.datastorage->checkpoint_column.get(), key_slice, value_str);
+    auto put_status = tx.checkpointPut(key_slice, value_str);
     if (!put_status.ok()) {
         std::cerr << "ArbCore unable to save checkpoint : "
                   << put_status.ToString() << "\n";
@@ -382,7 +386,7 @@ rocksdb::Status ArbCore::saveCheckpoint(Transaction& tx) {
     return rocksdb::Status::OK();
 }
 
-rocksdb::Status ArbCore::saveAssertion(Transaction& tx,
+rocksdb::Status ArbCore::saveAssertion(ReadWriteTransaction& tx,
                                        const Assertion& assertion) {
     auto status = saveLogs(tx, assertion.logs);
     if (!status.ok()) {
@@ -415,12 +419,11 @@ rocksdb::Status ArbCore::saveAssertion(Transaction& tx,
 // If use_latest is true, message_sequence_number is ignored and the latest
 // checkpoint is used.
 rocksdb::Status ArbCore::reorgToMessageOrBefore(
-    Transaction& tx,
+    ReadWriteTransaction& tx,
     const uint256_t& message_sequence_number,
     bool use_latest,
     ValueCache& cache) {
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->checkpoint_column.get()));
+    auto it = tx.checkpointGetIterator();
 
     // Find first checkpoint to delete
     it->SeekToLast();
@@ -455,8 +458,7 @@ rocksdb::Status ArbCore::reorgToMessageOrBefore(
             deleteMachineState(tx, checkpoint.machine_state_keys);
 
             // Delete checkpoint to make sure it isn't used later
-            tx.transaction->Delete(tx.datastorage->checkpoint_column.get(),
-                                   it->key());
+            tx.checkpointDelete(it->key());
 
             it->Prev();
             if (!it->status().ok()) {
@@ -523,14 +525,12 @@ rocksdb::Status ArbCore::reorgToMessageOrBefore(
 }
 
 ValueResult<Checkpoint> ArbCore::getCheckpoint(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     const uint256_t& arb_gas_used) const {
     std::vector<unsigned char> key;
     marshal_uint256_t(arb_gas_used, key);
 
-    auto result = getVectorUsingFamilyAndKey(
-        *tx.transaction, tx.datastorage->checkpoint_column.get(),
-        vecToSlice(key));
+    auto result = tx.checkpointGetVector(vecToSlice(key));
     if (!result.status.ok()) {
         return {result.status, {}};
     }
@@ -538,17 +538,15 @@ ValueResult<Checkpoint> ArbCore::getCheckpoint(
     return {rocksdb::Status::OK(), extractCheckpoint(result.data)};
 }
 
-bool ArbCore::isCheckpointsEmpty(Transaction& tx) const {
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->checkpoint_column.get()));
+bool ArbCore::isCheckpointsEmpty(ReadOnlyTransaction& tx) const {
+    auto it = std::unique_ptr<rocksdb::Iterator>(tx.checkpointGetIterator());
     it->SeekToLast();
     return !it->Valid();
 }
 
 uint256_t ArbCore::maxCheckpointGas() {
-    auto tx = Transaction::makeTransaction(data_storage);
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx->transaction->GetIterator(
-        rocksdb::ReadOptions(), tx->datastorage->checkpoint_column.get()));
+    auto tx = makeReadOnlyTransaction();
+    auto it = tx->checkpointGetIterator();
     it->SeekToLast();
     if (it->Valid()) {
         auto keyBuf = it->key().data();
@@ -562,11 +560,10 @@ uint256_t ArbCore::maxCheckpointGas() {
 // if `after_gas` is false. If `after_gas` is true, checkpoint after specified
 // gas is returned.
 ValueResult<Checkpoint> ArbCore::getCheckpointUsingGas(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     const uint256_t& total_gas,
     bool after_gas) {
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->checkpoint_column.get()));
+    auto it = tx.checkpointGetIterator();
     std::vector<unsigned char> key;
     marshal_uint256_t(total_gas, key);
     auto key_slice = vecToSlice(key);
@@ -598,7 +595,7 @@ ValueResult<Checkpoint> ArbCore::getCheckpointUsingGas(
 
 template <class T>
 std::unique_ptr<T> ArbCore::getMachineUsingStateKeys(
-    Transaction& transaction,
+    ReadOnlyTransaction& transaction,
     const MachineStateKeys& state_data,
     ValueCache& value_cache) {
     std::set<uint64_t> segment_ids;
@@ -666,13 +663,13 @@ std::unique_ptr<T> ArbCore::getMachineUsingStateKeys(
 }
 
 template std::unique_ptr<Machine> ArbCore::getMachineUsingStateKeys(
-    Transaction&,
-    const MachineStateKeys&,
-    ValueCache&);
+    ReadOnlyTransaction& transaction,
+    const MachineStateKeys& state_data,
+    ValueCache& value_cache);
 template std::unique_ptr<MachineThread> ArbCore::getMachineUsingStateKeys(
-    Transaction&,
-    const MachineStateKeys&,
-    ValueCache&);
+    ReadOnlyTransaction& transaction,
+    const MachineStateKeys& state_data,
+    ValueCache& value_cache);
 
 // operator() runs the main thread for ArbCore.  It is responsible for adding
 // messages to the queue, starting machine thread when needed and collecting
@@ -718,7 +715,7 @@ void ArbCore::operator()() {
         }
 
         if (machine->status() == MachineThread::MACHINE_SUCCESS) {
-            auto tx = Transaction::makeTransaction(data_storage);
+            auto tx = makeReadWriteTransaction();
 
             auto last_assertion = machine->nextAssertion();
 
@@ -788,7 +785,7 @@ void ArbCore::operator()() {
 
         if (machine->status() == MachineThread::MACHINE_NONE) {
             // Start execution of machine if new message available
-            auto tx = Transaction::makeTransaction(data_storage);
+            auto tx = makeReadOnlyTransaction();
             auto messages_count = messageEntryInsertedCountImpl(*tx);
             if (!messages_count.status.ok()) {
                 core_error_string = messages_count.status.ToString();
@@ -878,7 +875,7 @@ void ArbCore::operator()() {
 
         for (size_t i = 0; i < logs_cursors.size(); i++) {
             if (logs_cursors[i].status == DataCursor::REQUESTED) {
-                auto tx = Transaction::makeTransaction(data_storage);
+                auto tx = makeReadOnlyTransaction();
                 handleLogsCursorRequested(*tx, i, cache);
             }
         }
@@ -894,7 +891,7 @@ void ArbCore::operator()() {
     machine->abortMachine();
 }
 
-rocksdb::Status ArbCore::saveLogs(Transaction& tx,
+rocksdb::Status ArbCore::saveLogs(ReadWriteTransaction& tx,
                                   const std::vector<value>& vals) {
     if (vals.empty()) {
         return rocksdb::Status::OK();
@@ -921,8 +918,7 @@ rocksdb::Status ArbCore::saveLogs(Transaction& tx,
             reinterpret_cast<const char*>(value_hash.data()),
             value_hash.size());
 
-        auto status = tx.transaction->Put(data_storage->log_column.get(),
-                                          key_slice, value_hash_slice);
+        auto status = tx.logPut(key_slice, value_hash_slice);
         if (!status.ok()) {
             return status;
         }
@@ -935,7 +931,7 @@ rocksdb::Status ArbCore::saveLogs(Transaction& tx,
 ValueResult<std::vector<value>> ArbCore::getLogs(uint256_t index,
                                                  uint256_t count,
                                                  ValueCache& valueCache) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
 
     // Acquire mutex to make sure no reorg happening
     std::lock_guard<std::mutex> lock(core_reorg_mutex);
@@ -943,7 +939,7 @@ ValueResult<std::vector<value>> ArbCore::getLogs(uint256_t index,
     return getLogsNoLock(*tx, index, count, valueCache);
 }
 
-ValueResult<std::vector<value>> ArbCore::getLogsNoLock(Transaction& tx,
+ValueResult<std::vector<value>> ArbCore::getLogsNoLock(ReadOnlyTransaction& tx,
                                                        uint256_t index,
                                                        uint256_t count,
                                                        ValueCache& valueCache) {
@@ -967,9 +963,8 @@ ValueResult<std::vector<value>> ArbCore::getLogsNoLock(Transaction& tx,
     std::vector<unsigned char> key;
     marshal_uint256_t(index, key);
 
-    auto hash_result = getUint256VectorUsingFamilyAndKey(
-        *tx.transaction, data_storage->log_column.get(), vecToSlice(key),
-        intx::narrow_cast<size_t>(count));
+    auto hash_result = tx.logGetUint256Vector(vecToSlice(key),
+                                              intx::narrow_cast<size_t>(count));
     if (!hash_result.status.ok()) {
         return {hash_result.status, {}};
     }
@@ -987,7 +982,7 @@ ValueResult<std::vector<value>> ArbCore::getLogsNoLock(Transaction& tx,
 }
 
 rocksdb::Status ArbCore::saveSends(
-    Transaction& tx,
+    ReadWriteTransaction& tx,
     const std::vector<std::vector<unsigned char>>& sends) {
     if (sends.empty()) {
         return rocksdb::Status::OK();
@@ -1003,8 +998,7 @@ rocksdb::Status ArbCore::saveSends(
         marshal_uint256_t(send_count, key);
         auto key_slice = vecToSlice(key);
 
-        auto status = tx.transaction->Put(tx.datastorage->send_column.get(),
-                                          key_slice, vecToSlice(send));
+        auto status = tx.sendPut(key_slice, vecToSlice(send));
         if (!status.ok()) {
             return status;
         }
@@ -1017,7 +1011,7 @@ rocksdb::Status ArbCore::saveSends(
 ValueResult<std::vector<std::vector<unsigned char>>> ArbCore::getMessages(
     uint256_t index,
     uint256_t count) const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
 
     auto result = getMessagesImpl(*tx, index, count);
 
@@ -1026,7 +1020,7 @@ ValueResult<std::vector<std::vector<unsigned char>>> ArbCore::getMessages(
 
 ValueResult<std::pair<std::vector<std::vector<unsigned char>>,
                       std::optional<uint256_t>>>
-ArbCore::getMessagesImpl(Transaction& tx,
+ArbCore::getMessagesImpl(const ReadOnlyTransaction& tx,
                          uint256_t index,
                          uint256_t count) const {
     if (count == 0) {
@@ -1050,9 +1044,8 @@ ArbCore::getMessagesImpl(Transaction& tx,
     marshal_uint256_t(index, key);
     auto key_slice = vecToSlice(key);
 
-    auto results = getVectorVectorUsingFamilyAndKey(
-        *tx.transaction, data_storage->messageentry_column.get(), key_slice,
-        intx::narrow_cast<size_t>(count));
+    auto results = tx.messageEntryGetVectorVector(
+        key_slice, intx::narrow_cast<size_t>(count));
     if (!results.status.ok()) {
         return {results.status, {}};
     }
@@ -1077,7 +1070,7 @@ ArbCore::getMessagesImpl(Transaction& tx,
 ValueResult<std::vector<std::vector<unsigned char>>> ArbCore::getSends(
     uint256_t index,
     uint256_t count) const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
 
     if (count == 0) {
         return {rocksdb::Status::OK(), {}};
@@ -1100,13 +1093,11 @@ ValueResult<std::vector<std::vector<unsigned char>>> ArbCore::getSends(
     marshal_uint256_t(index, key);
     auto key_slice = vecToSlice(key);
 
-    return getVectorVectorUsingFamilyAndKey(
-        *tx->transaction, data_storage->send_column.get(), key_slice,
-        intx::narrow_cast<size_t>(count));
+    return tx->sendGetVectorVector(key_slice, intx::narrow_cast<size_t>(count));
 }
 
 ValueResult<uint256_t> ArbCore::getInboxAcc(uint256_t index) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
 
     auto result = getMessageEntry(*tx, index);
     if (!result.status.ok()) {
@@ -1119,7 +1110,7 @@ ValueResult<uint256_t> ArbCore::getInboxAcc(uint256_t index) {
 ValueResult<std::pair<uint256_t, uint256_t>> ArbCore::getInboxAccPair(
     uint256_t index1,
     uint256_t index2) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
     const std::lock_guard<std::mutex> lock(core_reorg_mutex);
 
     auto result1 = getMessageEntry(*tx, index1);
@@ -1170,7 +1161,7 @@ ValueResult<uint256_t> ArbCore::getLogAcc(uint256_t start_acc_hash,
 ValueResult<std::unique_ptr<ExecutionCursor>> ArbCore::getExecutionCursor(
     uint256_t total_gas_used,
     ValueCache& cache) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
 
     auto execution_cursor = std::make_unique<ExecutionCursor>();
 
@@ -1185,7 +1176,7 @@ rocksdb::Status ArbCore::advanceExecutionCursor(
     uint256_t max_gas,
     bool go_over_gas,
     ValueCache& cache) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
 
     return getExecutionCursorImpl(*tx, execution_cursor,
                                   execution_cursor.arb_gas_used + max_gas,
@@ -1193,7 +1184,7 @@ rocksdb::Status ArbCore::advanceExecutionCursor(
 }
 
 rocksdb::Status ArbCore::getExecutionCursorImpl(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     ExecutionCursor& execution_cursor,
     uint256_t total_gas_used,
     bool go_over_gas,
@@ -1277,7 +1268,7 @@ rocksdb::Status ArbCore::getExecutionCursorImpl(
     return rocksdb::Status::OK();
 }
 
-rocksdb::Status ArbCore::resolveStagedMessage(Transaction& tx,
+rocksdb::Status ArbCore::resolveStagedMessage(ReadOnlyTransaction& tx,
                                               MachineState& machine_state,
                                               uint256_t& inbox_acc) const {
     if (machine_state.stagedMessageUnresolved()) {
@@ -1296,7 +1287,7 @@ rocksdb::Status ArbCore::resolveStagedMessage(Transaction& tx,
 }
 
 rocksdb::Status ArbCore::resolveStagedMessageInStateKeys(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     MachineStateKeys& machine_state_keys,
     uint256_t& inbox_acc) const {
     if (machine_state_keys.stagedMessageUnresolved()) {
@@ -1314,12 +1305,12 @@ rocksdb::Status ArbCore::resolveStagedMessageInStateKeys(
     return rocksdb::Status::OK();
 }
 
-rocksdb::Status ArbCore::executionCursorSetup(Transaction& tx,
+rocksdb::Status ArbCore::executionCursorSetup(ReadOnlyTransaction& tx,
                                               ExecutionCursor& execution_cursor,
-                                              const uint256_t& gas_used,
+                                              const uint256_t& total_gas_used,
                                               ValueCache& cache,
                                               bool is_for_sideload) {
-    auto target_gas_used = gas_used;
+    auto target_gas_used = total_gas_used;
     while (true) {
         const std::lock_guard<std::mutex> lock(core_reorg_mutex);
         auto checkpoint_result =
@@ -1385,7 +1376,7 @@ rocksdb::Status ArbCore::executionCursorSetup(Transaction& tx,
 }
 
 ValueResult<bool> ArbCore::executionCursorAddMessages(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     ExecutionCursor& execution_cursor,
     const uint256_t& orig_message_group_size) {
     const std::lock_guard<std::mutex> lock(core_reorg_mutex);
@@ -1395,7 +1386,7 @@ ValueResult<bool> ArbCore::executionCursorAddMessages(
 }
 
 ValueResult<bool> ArbCore::executionCursorAddMessagesNoLock(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     ExecutionCursor& execution_cursor,
     const uint256_t& orig_message_group_size) {
     auto message_group_size = orig_message_group_size;
@@ -1439,8 +1430,7 @@ ValueResult<bool> ArbCore::executionCursorAddMessagesNoLock(
     marshal_uint256_t(current_message_sequence_number, message_key);
     auto message_key_slice = vecToSlice(message_key);
 
-    auto results = getVectorVectorUsingFamilyAndKey(
-        *tx.transaction, data_storage->messageentry_column.get(),
+    auto results = tx.messageEntryGetVectorVector(
         message_key_slice, intx::narrow_cast<size_t>(message_group_size));
     if (!results.status.ok()) {
         return {results.status, false};
@@ -1466,112 +1456,97 @@ ValueResult<bool> ArbCore::executionCursorAddMessagesNoLock(
 }
 
 ValueResult<uint256_t> ArbCore::logInsertedCount() const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
 
     return logInsertedCountImpl(*tx);
 }
 
-ValueResult<uint256_t> ArbCore::logInsertedCountImpl(Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(log_inserted_key));
+ValueResult<uint256_t> ArbCore::logInsertedCountImpl(
+    const ReadOnlyTransaction& tx) const {
+    return tx.logGetUint256(vecToSlice(log_inserted_key));
 }
-rocksdb::Status ArbCore::updateLogInsertedCount(Transaction& tx,
+rocksdb::Status ArbCore::updateLogInsertedCount(ReadWriteTransaction& tx,
                                                 const uint256_t& log_index) {
     std::vector<unsigned char> value;
     marshal_uint256_t(log_index, value);
 
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(log_inserted_key), vecToSlice(value));
+    return tx.statePut(vecToSlice(log_inserted_key), vecToSlice(value));
 }
 
-ValueResult<uint256_t> ArbCore::logProcessedCount(Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(log_processed_key));
+ValueResult<uint256_t> ArbCore::logProcessedCount(
+    ReadOnlyTransaction& tx) const {
+    return tx.stateGetUint256(vecToSlice(log_processed_key));
 }
-rocksdb::Status ArbCore::updateLogProcessedCount(Transaction& tx,
+rocksdb::Status ArbCore::updateLogProcessedCount(ReadWriteTransaction& tx,
                                                  rocksdb::Slice value_slice) {
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(log_processed_key), value_slice);
+    return tx.statePut(vecToSlice(log_processed_key), value_slice);
 }
 
 ValueResult<uint256_t> ArbCore::sendInsertedCount() const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
 
     return sendInsertedCountImpl(*tx);
 }
 
-ValueResult<uint256_t> ArbCore::sendInsertedCountImpl(Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(send_inserted_key));
+ValueResult<uint256_t> ArbCore::sendInsertedCountImpl(
+    const ReadOnlyTransaction& tx) const {
+    return tx.stateGetUint256(vecToSlice(send_inserted_key));
 }
 
-rocksdb::Status ArbCore::updateSendInsertedCount(Transaction& tx,
+rocksdb::Status ArbCore::updateSendInsertedCount(ReadWriteTransaction& tx,
                                                  const uint256_t& send_index) {
     std::vector<unsigned char> value;
     marshal_uint256_t(send_index, value);
 
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(send_inserted_key),
-                               vecToSlice(value));
+    return tx.statePut(vecToSlice(send_inserted_key), vecToSlice(value));
 }
 
-ValueResult<uint256_t> ArbCore::sendProcessedCount(Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(send_processed_key));
+ValueResult<uint256_t> ArbCore::sendProcessedCount(
+    ReadOnlyTransaction& tx) const {
+    return tx.stateGetUint256(vecToSlice(send_processed_key));
 }
-rocksdb::Status ArbCore::updateSendProcessedCount(Transaction& tx,
+rocksdb::Status ArbCore::updateSendProcessedCount(ReadWriteTransaction& tx,
                                                   rocksdb::Slice value_slice) {
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(send_processed_key), value_slice);
+    return tx.statePut(vecToSlice(send_processed_key), value_slice);
 }
 
 ValueResult<uint256_t> ArbCore::messageEntryInsertedCount() const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
 
     return messageEntryInsertedCountImpl(*tx);
 }
 
 ValueResult<uint256_t> ArbCore::messageEntryInsertedCountImpl(
-    Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(message_entry_inserted_key));
+    const ReadOnlyTransaction& tx) const {
+    return tx.stateGetUint256(vecToSlice(message_entry_inserted_key));
 }
 
 rocksdb::Status ArbCore::updateMessageEntryInsertedCount(
-    Transaction& tx,
+    ReadWriteTransaction& tx,
     const uint256_t& message_index) {
     std::vector<unsigned char> value;
     marshal_uint256_t(message_index, value);
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(message_entry_inserted_key),
-                               vecToSlice(value));
+    return tx.statePut(vecToSlice(message_entry_inserted_key),
+                       vecToSlice(value));
 }
 
 ValueResult<uint256_t> ArbCore::messageEntryProcessedCount() const {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeConstReadOnlyTransaction();
     return messageEntryProcessedCountImpl(*tx);
 }
 
 ValueResult<uint256_t> ArbCore::messageEntryProcessedCountImpl(
-    Transaction& tx) const {
-    return getUint256UsingFamilyAndKey(*tx.transaction,
-                                       tx.datastorage->state_column.get(),
-                                       vecToSlice(message_entry_processed_key));
+    const ReadOnlyTransaction& tx) const {
+    return tx.stateGetUint256(vecToSlice(message_entry_processed_key));
 }
 
 rocksdb::Status ArbCore::updateMessageEntryProcessedCount(
-    Transaction& tx,
+    ReadWriteTransaction& tx,
     const uint256_t& message_index) {
     std::vector<unsigned char> value;
     marshal_uint256_t(message_index, value);
-    return tx.transaction->Put(tx.datastorage->state_column.get(),
-                               vecToSlice(message_entry_processed_key),
-                               vecToSlice(value));
+    return tx.statePut(vecToSlice(message_entry_processed_key),
+                       vecToSlice(value));
 }
 
 // addMessages stores all messages from given block into database.
@@ -1585,7 +1560,7 @@ std::optional<rocksdb::Status> ArbCore::addMessages(
     const uint256_t& message_count_in_machine,
     const std::optional<uint256_t>& reorg_message_count,
     ValueCache& cache) {
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadWriteTransaction();
 
     auto message_count_result = messageEntryInsertedCountImpl(*tx);
     if (!message_count_result.status.ok()) {
@@ -1729,9 +1704,8 @@ std::optional<rocksdb::Status> ArbCore::addMessages(
         auto serialized_messageentry = serializeMessageEntry(messageEntry);
 
         // Save message entry into database
-        auto put_status = tx->transaction->Put(
-            tx->datastorage->messageentry_column.get(), vecToSlice(key),
-            vecToSlice(serialized_messageentry));
+        auto put_status = tx->messageEntryPut(
+            vecToSlice(key), vecToSlice(serialized_messageentry));
         if (!put_status.ok()) {
             return put_status;
         }
@@ -1748,10 +1722,9 @@ std::optional<rocksdb::Status> ArbCore::addMessages(
 
 // deleteLogsStartingAt deletes the given index along with any
 // newer logs. Returns std::nullopt if nothing deleted.
-std::optional<rocksdb::Status> deleteLogsStartingAt(Transaction& tx,
+std::optional<rocksdb::Status> deleteLogsStartingAt(ReadWriteTransaction& tx,
                                                     uint256_t log_index) {
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->log_column.get()));
+    auto it = tx.logGetIterator();
 
     // Find first message to delete
     std::vector<unsigned char> key;
@@ -1779,7 +1752,7 @@ std::optional<rocksdb::Status> deleteLogsStartingAt(Transaction& tx,
     return rocksdb::Status::OK();
 }
 
-bool ArbCore::handleLogsCursorRequested(Transaction& tx,
+bool ArbCore::handleLogsCursorRequested(ReadOnlyTransaction& tx,
                                         size_t cursor_index,
                                         ValueCache& cache) {
     if (cursor_index >= logs_cursors.size()) {
@@ -1848,7 +1821,7 @@ bool ArbCore::handleLogsCursorRequested(Transaction& tx,
 // because it is happening out of line.
 // Note that cursor reorg never adds new messages, but might add deleted
 // messages.
-rocksdb::Status ArbCore::handleLogsCursorReorg(Transaction& tx,
+rocksdb::Status ArbCore::handleLogsCursorReorg(ReadWriteTransaction& tx,
                                                size_t cursor_index,
                                                uint256_t log_count,
                                                ValueCache& cache) {
@@ -1958,7 +1931,7 @@ ArbCore::logsCursorGetLogs(size_t cursor_index) {
     logs.swap(logs_cursors[cursor_index].data);
     logs_cursors[cursor_index].data.clear();
 
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
     auto current_count_result =
         logsCursorGetCurrentTotalCount(*tx, cursor_index);
     if (!current_count_result.status.ok()) {
@@ -1989,7 +1962,7 @@ ArbCore::logsCursorGetDeletedLogs(size_t cursor_index) {
     logs.swap(logs_cursors[cursor_index].deleted_data);
     logs_cursors[cursor_index].deleted_data.clear();
 
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
     auto current_count_result =
         logsCursorGetCurrentTotalCount(*tx, cursor_index);
     if (!current_count_result.status.ok()) {
@@ -2025,7 +1998,7 @@ bool ArbCore::logsCursorConfirmReceived(size_t cursor_index) {
         return false;
     }
 
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadWriteTransaction();
     auto status = logsCursorSaveCurrentTotalCount(
         *tx, cursor_index, logs_cursors[cursor_index].pending_total_count);
     tx->commit();
@@ -2068,26 +2041,24 @@ std::string ArbCore::logsCursorClearError(size_t cursor_index) {
     return str;
 }
 
-rocksdb::Status ArbCore::logsCursorSaveCurrentTotalCount(Transaction& tx,
-                                                         size_t cursor_index,
-                                                         uint256_t count) {
+rocksdb::Status ArbCore::logsCursorSaveCurrentTotalCount(
+    ReadWriteTransaction& tx,
+    size_t cursor_index,
+    uint256_t count) {
     std::vector<unsigned char> value_data;
     marshal_uint256_t(count, value_data);
-    return tx.transaction->Put(
-        data_storage->state_column.get(),
-        vecToSlice(logs_cursors[cursor_index].current_total_key),
-        vecToSlice(value_data));
+    return tx.statePut(vecToSlice(logs_cursors[cursor_index].current_total_key),
+                       vecToSlice(value_data));
 }
 
 ValueResult<uint256_t> ArbCore::logsCursorGetCurrentTotalCount(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     size_t cursor_index) {
-    return getUint256UsingFamilyAndKey(
-        *tx.transaction, tx.datastorage->state_column.get(),
+    return tx.stateGetUint256(
         vecToSlice(logs_cursors[cursor_index].current_total_key));
 }
 
-rocksdb::Status ArbCore::saveSideloadPosition(Transaction& tx,
+rocksdb::Status ArbCore::saveSideloadPosition(ReadWriteTransaction& tx,
                                               const uint256_t& block_number) {
     std::vector<unsigned char> key;
     marshal_uint256_t(block_number, key);
@@ -2097,19 +2068,17 @@ rocksdb::Status ArbCore::saveSideloadPosition(Transaction& tx,
     marshal_uint256_t(pending_checkpoint.arb_gas_used, value);
     auto value_slice = vecToSlice(value);
 
-    return tx.transaction->Put(tx.datastorage->sideload_column.get(), key_slice,
-                               value_slice);
+    return tx.sideloadPut(key_slice, value_slice);
 }
 
 ValueResult<uint256_t> ArbCore::getSideloadPosition(
-    Transaction& tx,
+    ReadOnlyTransaction& tx,
     const uint256_t& block_number) {
     std::vector<unsigned char> key;
     marshal_uint256_t(block_number, key);
     auto key_slice = vecToSlice(key);
 
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->sideload_column.get()));
+    auto it = tx.sideloadGetIterator();
 
     it->SeekForPrev(key_slice);
 
@@ -2125,7 +2094,7 @@ ValueResult<uint256_t> ArbCore::getSideloadPosition(
 }
 
 rocksdb::Status ArbCore::deleteSideloadsStartingAt(
-    Transaction& tx,
+    ReadWriteTransaction& tx,
     const uint256_t& block_number) {
     // Clear the cache
     {
@@ -2141,13 +2110,12 @@ rocksdb::Status ArbCore::deleteSideloadsStartingAt(
     marshal_uint256_t(block_number, key);
     auto key_slice = vecToSlice(key);
 
-    auto it = std::unique_ptr<rocksdb::Iterator>(tx.transaction->GetIterator(
-        rocksdb::ReadOptions(), tx.datastorage->sideload_column.get()));
+    auto it = tx.sideloadGetIterator();
 
     it->Seek(key_slice);
 
     while (it->Valid()) {
-        tx.transaction->Delete(it->key());
+        tx.sideloadDelete(it->key());
         it->Next();
     }
     auto s = it->status();
@@ -2173,7 +2141,7 @@ ValueResult<std::unique_ptr<Machine>> ArbCore::getMachineForSideload(
         }
     }
     // Not found in cache, try the DB
-    auto tx = Transaction::makeTransaction(data_storage);
+    auto tx = makeReadOnlyTransaction();
     auto position_res = getSideloadPosition(*tx, block_number);
     if (!position_res.status.ok()) {
         return {position_res.status, std::unique_ptr<Machine>(nullptr)};

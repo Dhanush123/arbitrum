@@ -19,6 +19,7 @@
 #include "value/utils.hpp"
 
 #include <data_storage/datastorage.hpp>
+#include <data_storage/readonlytransaction.hpp>
 #include <data_storage/storageresult.hpp>
 
 #include <rocksdb/status.h>
@@ -258,9 +259,8 @@ void AggregatorStore::reorg(uint64_t block_height) {
 }
 
 ValueResult<uint256_t> AggregatorStore::logsProcessedCount() const {
-    auto tx = data_storage->beginTransaction();
-    return getUint256UsingFamilyAndKey(*tx, data_storage->default_column.get(),
-                                       vecToSlice(logs_processed_key));
+    auto tx = ReadOnlyTransaction::makeReadOnlyTransaction(data_storage);
+    return tx->defaultGetUint256(vecToSlice(logs_processed_key));
 }
 
 void AggregatorStore::updateLogsProcessedCount(const uint256_t& count) {

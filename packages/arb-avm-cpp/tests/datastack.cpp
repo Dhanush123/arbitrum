@@ -17,6 +17,7 @@
 #include "helper.hpp"
 
 #include <data_storage/arbstorage.hpp>
+#include <data_storage/readwritetransaction.hpp>
 #include <data_storage/storageresult.hpp>
 #include <data_storage/value/value.hpp>
 
@@ -31,7 +32,7 @@
 std::string dbpath =
     boost::filesystem::current_path().generic_string() + "/machineDb";
 
-void initializeDatastack(const Transaction& transaction,
+void initializeDatastack(const ReadOnlyTransaction& transaction,
                          uint256_t tuple_hash,
                          uint256_t expected_hash,
                          uint64_t expected_size) {
@@ -49,7 +50,7 @@ void initializeDatastack(const Transaction& transaction,
 void saveDataStack(const Datastack& data_stack) {
     ArbStorage storage(dbpath);
     std::vector<CodePoint> code;
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     auto tuple_ret = data_stack.getTupleRepresentation();
     auto results = saveValue(*transaction, tuple_ret);
@@ -62,7 +63,7 @@ void saveDataStack(const Datastack& data_stack) {
 void saveDataStackTwice(const Datastack& data_stack) {
     ArbStorage storage(dbpath);
     std::vector<CodePoint> code;
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
 
     auto tuple_ret = data_stack.getTupleRepresentation();
     auto results = saveValue(*transaction, tuple_ret);
@@ -73,7 +74,7 @@ void saveDataStackTwice(const Datastack& data_stack) {
     REQUIRE(results2.reference_count == 2);
 }
 
-void saveAndGetDataStack(Transaction& transaction,
+void saveAndGetDataStack(ReadWriteTransaction& transaction,
                          const Datastack& data_stack,
                          uint256_t expected_hash) {
     auto tuple_ret = data_stack.getTupleRepresentation();
@@ -90,7 +91,7 @@ void saveAndGetDataStack(Transaction& transaction,
     REQUIRE(hash_value(get_results.data) == expected_hash);
 }
 
-void saveTwiceAndGetDataStack(Transaction& transaction,
+void saveTwiceAndGetDataStack(ReadWriteTransaction& transaction,
                               const Datastack& data_stack,
                               uint256_t expected_hash) {
     auto tuple_ret = data_stack.getTupleRepresentation();
@@ -112,7 +113,7 @@ void saveTwiceAndGetDataStack(Transaction& transaction,
 TEST_CASE("Initialize datastack") {
     DBDeleter deleter;
     ArbStorage storage(dbpath);
-    auto transaction = storage.makeTransaction();
+    auto transaction = storage.makeReadWriteTransaction();
     Datastack data_stack;
 
     SECTION("default") {
@@ -194,7 +195,7 @@ TEST_CASE("Save and get datastack") {
 
     SECTION("save datastack and get") {
         uint256_t intVal = 5435;
-        auto transaction = storage.makeTransaction();
+        auto transaction = storage.makeReadWriteTransaction();
         uint256_t num = 1;
         auto tuple = Tuple::createTuple(intVal);
         datastack.push(num);
@@ -206,7 +207,7 @@ TEST_CASE("Save and get datastack") {
     }
     SECTION("save datastack twice and get") {
         uint256_t intVal = 5435;
-        auto transaction = storage.makeTransaction();
+        auto transaction = storage.makeReadWriteTransaction();
         uint256_t num = 1;
         auto tuple = Tuple::createTuple(intVal);
         datastack.push(num);

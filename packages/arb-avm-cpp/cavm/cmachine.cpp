@@ -54,7 +54,7 @@ void machineDestroy(CMachine* m) {
 int checkpointMachine(CMachine* m, CArbStorage* s) {
     auto machine = static_cast<Machine*>(m);
     auto storage = static_cast<ArbStorage*>(s);
-    auto transaction = storage->makeTransaction();
+    auto transaction = storage->makeReadWriteTransaction();
     auto result = saveMachine(*transaction, *machine);
     if (!result.status.ok()) {
         return false;
