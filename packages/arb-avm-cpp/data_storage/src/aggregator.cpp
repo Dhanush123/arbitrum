@@ -106,8 +106,7 @@ void saveBlockCount(rocksdb::Transaction& tx, uint64_t max) {
 
 uint64_t blockCountImpl(rocksdb::Transaction& tx) {
     std::string value;
-    auto s =
-        tx.GetForUpdate(rocksdb::ReadOptions{}, vecToSlice(block_key), &value);
+    auto s = tx.Get(rocksdb::ReadOptions{}, vecToSlice(block_key), &value);
     if (!s.ok()) {
         throw std::runtime_error("no block count saved");
     }
@@ -138,8 +137,7 @@ namespace {
 template <typename Key>
 std::optional<uint64_t> returnIndex(rocksdb::Transaction& tx, const Key& key) {
     std::string request_value;
-    auto s = tx.GetForUpdate(rocksdb::ReadOptions{}, vecToSlice(key),
-                             &request_value);
+    auto s = tx.Get(rocksdb::ReadOptions{}, vecToSlice(key), &request_value);
     if (s.IsNotFound()) {
         return std::nullopt;
     }
